@@ -189,7 +189,7 @@ def execute(init_times, args, p):
     for init_time, res in multiple_results.items():
         try:
             res.get(timeout=args.timeout)
-        except (HTTPError, TimeoutError, OSError):
+        except (HTTPError, TimeoutError, OSError, IndexError):
             logging.exception('failed to get forecast for %s', init_time)
             failures.append(init_time)
         else:
