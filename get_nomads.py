@@ -26,49 +26,102 @@ from pydap.client import open_url
 from webob.exc import HTTPError
 
 # some other variables of interest are commented out for efficiency
-DEFAULT_VARIABLES = (
-    'Temperature_surface',
-#              'Wind_speed_gust',
-     'U-component_of_wind',
-     'V-component_of_wind',
-     'Total_cloud_cover_entire_atmosphere',
-#              'Total_cloud_cover_high_cloud',
-#              'Total_cloud_cover_low_cloud',
-#              'Total_cloud_cover_middle_cloud',
-#              'Downward_Short-Wave_Rad_Flux'
-    )
+
+MODEL_DEFAULTS = {
+    'gfs4': {
+        'variables': (
+            'Temperature_surface',
+            # 'Wind_speed_gust',
+            'U-component_of_wind',
+            'V-component_of_wind',
+            'Total_cloud_cover_entire_atmosphere',
+            # 'Total_cloud_cover_high_cloud',
+            # 'Total_cloud_cover_low_cloud',
+            # 'Total_cloud_cover_middle_cloud',
+            # 'Downward_Short-Wave_Rad_Flux'
+        ),
+        'model_route': 'gfs-004',
+        'file_prefix': 'gfs_4',
+        'time_resolution': 3,
+        'grib_format': 'grb2',
+        'max_hours': 384
+    },
+    'nam218': {
+        'variables': (
+            'Temperature_surface',
+            'u_wind_height_above_ground',
+            'v_wind_height_above_ground',
+            'Total_cloud_cover',
+            'Downward_short_wave_flux'
+        ),
+        'model_route': 'nam218',
+        'file_prefix': 'nam_218',
+        'time_resolution': {1: (1, 36), 3: (39, 84)},
+        'grib_format': 'grb',
+        'max_hours': 84,
+    },
+    'rap130': {
+        'variables': (
+            'Temperature_surface',
+            'U-component_of_wind_height_above_ground',
+            'V-component_of_wind_height_above_ground',
+            'Total_cloud_cover',
+            # 'Downward_short_wave_flux'
+        ),
+        'model_route': 'rap130',
+        'file_prefix': 'rap_130',
+        'time_resolution': 1,
+        'grib_format': 'grb2',
+        'max_hours': 18
+    },
+}
 
 
-def multiple_times(init_timestamp, hours, lat_idx, lon_idx, variables):
-    route = 'https://nomads.ncdc.noaa.gov/thredds/dodsC/gfs-004/'
-    init_timestr = init_timestamp.strftime('%Y%m/%Y%m%d/gfs_4_%Y%m%d_%H%M')
+def multiple_times(init_timestamp, hours, lat_idx, lon_idx, variables,
+                   model_route, file_prefix, time_resolution, grib_format):
+    route = f'https://nomads.ncdc.noaa.gov/thredds/dodsC/{model_route}/'
+    init_timestr = init_timestamp.strftime(
+        f'%Y%m/%Y%m%d/{file_prefix}_%Y%m%d_%H%M')
 
     multiple_time_data = {}
-    for fx_hour in range(3, hours+1, 3):
-        full_uri = ('{route}{init_timestr}_{fx_hour:0>3}.grb2'.format(
-            route=route, init_timestr=init_timestr, fx_hour=fx_hour))
-        logging.info('getting data from %s', full_uri)
-        dataset = open_url(full_uri)
-        fx_timestamp = init_timestamp + pd.Timedelta(fx_hour, unit='h')
-        try:
-            single_time_data = single_time(dataset, lat_idx, lon_idx,
-                                           variables)
-        except HTTPError as e:
-            logging.warning('error getting %s retrying in 30s.', full_uri)
-            time.sleep(30)
+
+    if isinstance(time_resolution, dict):
+        pass
+    else:
+        time_resolution = {time_resolution: (time_resolution, hours)}
+
+    for res, (start, end) in time_resolution.items():
+        end = end + 1
+        for fx_hour in range(start, end, res):
+            full_uri = (
+                '{route}{init_timestr}_{fx_hour:0>3}.{grib_format}'.format(
+                route=route, init_timestr=init_timestr, fx_hour=fx_hour,
+                grib_format=grib_format))
+            logging.info('getting data from %s', full_uri)
+            dataset = open_url(full_uri)
+            fx_timestamp = init_timestamp + pd.Timedelta(fx_hour, unit='h')
             try:
                 single_time_data = single_time(dataset, lat_idx, lon_idx,
                                                variables)
             except HTTPError as e:
-                logging.warning(
-                    '2nd error getting %s retrying in 30s.', full_uri)
+                logging.warning('error getting %s retrying in 30s.', full_uri)
                 time.sleep(30)
-                single_time_data = single_time(dataset, lat_idx, lon_idx,
-                                               variables)
-        except KeyError as e:
-            logging.error('KeyError in %s', full_uri)
+                try:
+                    single_time_data = single_time(dataset, lat_idx, lon_idx,
+                                                   variables)
+                except HTTPError as e:
+                    logging.warning(
+                        '2nd error getting %s retrying in 30s.', full_uri)
+                    time.sleep(30)
+                    single_time_data = single_time(dataset, lat_idx, lon_idx,
+                                                   variables)
+            except KeyError as e:
+                logging.error('KeyError in %s', full_uri)
 
-        multiple_time_data[fx_timestamp] = single_time_data
+            try:
+                multiple_time_data[fx_timestamp] = single_time_data
+            except UnboundLocalError:
+                logging.error('no data for %s', full_uri)
 
     return multiple_time_data
 
@@ -122,9 +175,15 @@ def construct_dataframe(multiple_time_data):
 def single_forecast(init_time, args):
     init_timestamp = pd.Timestamp(init_time)
 
+    model_defaults = MODEL_DEFAULTS[args.model]
+
     multiple_time_data = multiple_times(init_timestamp, args.hours,
                                         args.lat_idx, args.lon_idx,
-                                        args.variables)
+                                        model_defaults['variables'],
+                                        model_defaults['model_route'],
+                                        model_defaults['file_prefix'],
+                                        model_defaults['time_resolution'],
+                                        model_defaults['grib_format'])
 
     df = construct_dataframe(multiple_time_data)
 
@@ -152,13 +211,16 @@ def parse_args():
     argparser.add_argument('-v', '--verbose',
                            help='Increase logging verbosity',
                            action='count')
-    argparser.add_argument('--variables',
-                           help='forecast variables (comma separated)',
-                           default=DEFAULT_VARIABLES)
+#     argparser.add_argument('--variables',
+#                            help='forecast variables (comma separated)',
+#                            default=DEFAULT_VARIABLES)
     argparser.add_argument('--timeout', help='request timeout', type=int,
                            default=None)
     argparser.add_argument('--processes', help='number of processes', type=int,
                            default=8)
+    argparser.add_argument('--model', help='name of model',
+                           default='gfs4',
+                           choices=['gfs4', 'nam218', 'rap130'])
     # pydap cache not working https://github.com/pydap/pydap/pull/37
     # argparser.add_argument('-c', '--cache', help='pydap cache', default=None)
 
@@ -189,7 +251,7 @@ def execute(init_times, args, p):
     for init_time, res in multiple_results.items():
         try:
             res.get(timeout=args.timeout)
-        except (HTTPError, TimeoutError, OSError, IndexError):
+        except (HTTPError, TimeoutError, OSError, IndexError, AttributeError):
             logging.exception('failed to get forecast for %s', init_time)
             failures.append(init_time)
         else:
